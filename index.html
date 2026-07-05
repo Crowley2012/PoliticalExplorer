@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>US Politics Explorer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='40' fill='%233987e5'/%3E%3Ccircle cx='65' cy='60' r='18' fill='%23e66767'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">
+      <span class="brand-mark"><span class="dot dot-d"></span><span class="dot dot-r"></span></span>
+      <h1>US Politics Explorer</h1>
+    </div>
+    <div class="search-wrap">
+      <input id="search" type="text" placeholder="Search people, states, offices…  ( / )" autocomplete="off" spellcheck="false">
+      <div id="search-results" hidden></div>
+    </div>
+    <div class="legend" aria-label="Party color legend">
+      <span class="legend-item"><span class="swatch" style="background:var(--party-d)"></span>Democrat</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--party-r)"></span>Republican</span>
+      <span class="legend-item"><span class="swatch" style="background:var(--party-i)"></span>Independent</span>
+      <span class="legend-item"><span class="swatch swatch-ring"></span>Office / group</span>
+    </div>
+  </header>
+
+  <nav id="breadcrumbs" aria-label="Current location"></nav>
+
+  <main id="stage">
+    <svg id="viz" role="application" aria-label="Zoomable map of the United States government"></svg>
+  </main>
+
+  <aside id="infobar">
+    <div id="info-title"></div>
+    <div id="info-desc"></div>
+    <div id="info-partybar" hidden>
+      <div class="pb-track"></div>
+      <div class="pb-counts"></div>
+    </div>
+    <div class="hint">Click a bubble to dive in · click the background or press <kbd>Esc</kbd> to zoom out</div>
+  </aside>
+
+  <aside id="panel" hidden>
+    <button id="panel-close" aria-label="Close details">×</button>
+    <div id="panel-body"></div>
+  </aside>
+
+  <div id="tooltip" hidden></div>
+  <div id="asof"></div>
+
+  <script src="lib/d3.min.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
