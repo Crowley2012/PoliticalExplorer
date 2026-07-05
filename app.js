@@ -47,84 +47,110 @@
     .attr("viewBox", `${-S / 2} ${-S / 2} ${S} ${S}`)
     .on("click", () => zoom(focus.parent || root));
 
-  // ---------- circles ----------
-  const node = svg
-    .append("g")
-    .selectAll("circle")
-    .data(root.descendants())
-    .join("circle")
-    .attr("class", (d) => "n-" + (d.data.kind || "group"))
-    .attr("fill", (d) => {
-      if (d.data.kind === "person") return PARTY_COLOR[d.data.party] || PARTY_COLOR.O;
-      if (d.data.kind === "info") return "rgba(255,255,255,0.03)";
-      return d === root ? "none" : "rgba(255,255,255,0.035)";
-    })
-    .attr("stroke", (d) => {
-      if (d.data.kind === "person") return "rgba(0,0,0,0.35)";
-      if (d.data.kind === "info") return "rgba(255,255,255,0.22)";
-      return d === root ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.13)";
-    })
-    .attr("stroke-dasharray", (d) => (d.data.kind === "info" ? "3 3" : null))
-    .style("cursor", "pointer")
-    .on("mouseover", function (event, d) {
-      d3.select(this).attr("stroke", d.data.kind === "person" ? "#ffffff" : "rgba(255,255,255,0.5)");
-      showTooltip(event, d);
-    })
-    .on("mousemove", (event, d) => showTooltip(event, d))
-    .on("mouseout", function (event, d) {
-      d3.select(this).attr("stroke", d.data.kind === "person" ? "rgba(0,0,0,0.35)"
-        : d.data.kind === "info" ? "rgba(255,255,255,0.22)"
-        : d === root ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.13)");
-      hideTooltip();
-    })
-    .on("click", (event, d) => {
-      event.stopPropagation();
-      hideTooltip();
-      if (d.data.kind === "person" || d.data.kind === "info") {
-        openPanel(d.data);
-        zoom(d.parent && projR(d) < 90 ? d : focus === d.parent ? focus : d.parent || root);
-      } else if (d !== focus) {
-        closePanel();
-        zoom(d);
-      } else if (d.parent) {
-        zoom(d.parent);
-      }
-    });
+  // ---------- circles & labels (virtualized) ----------
+  // Only the focused node's ancestor chain, each ancestor's siblings, and the
+  // focus's own children ever need DOM elements — anything further away is
+  // nested inside a sibling circle far too small to see, so skipping it is
+  // visually invisible but keeps the live element count in the hundreds
+  // instead of ~8,800 (one circle + text per legislator) at all times.
+  function computeVisible(f) {
+    const set = new Set([root]);
+    const path = f.ancestors().reverse(); // root -> ... -> focus
+    for (let i = 1; i < path.length; i++) {
+      const parent = path[i - 1];
+      if (parent.children) parent.children.forEach((c) => set.add(c));
+    }
+    if (f.children) f.children.forEach((c) => set.add(c));
+    return Array.from(set);
+  }
 
-  // ---------- labels ----------
-  const label = svg
-    .append("g")
-    .attr("pointer-events", "none")
-    .attr("text-anchor", "middle")
-    .selectAll("text")
-    .data(root.descendants())
-    .join("text")
-    .style("display", "none")
-    .attr("fill", (d) => (d.data.kind === "person" ? "#0b0d10" : "#ffffff"))
-    .attr("paint-order", "stroke")
-    .attr("stroke", (d) => (d.data.kind === "person" ? "rgba(255,255,255,0.25)" : "rgba(13,15,19,0.65)"))
-    .attr("stroke-width", (d) => (d.data.kind === "person" ? 0 : 3))
-    .attr("font-weight", 600)
-    .each(function (d) {
-      const lines = wrap(d.data.name, d.data.kind === "person" ? 11 : 14);
-      const el = d3.select(this);
-      const n = lines.length + (d.children ? 1 : 0);
-      lines.forEach((line, i) => {
-        el.append("tspan")
-          .attr("x", 0)
-          .attr("dy", i === 0 ? `${-(n - 1) * 0.55}em` : "1.1em")
-          .text(line);
+  const nodeLayer = svg.append("g");
+  const labelLayer = svg.append("g").attr("pointer-events", "none").attr("text-anchor", "middle");
+
+  function applyNodeEnter(sel) {
+    sel
+      .attr("class", (d) => "n-" + (d.data.kind || "group"))
+      .attr("fill", (d) => {
+        if (d.data.kind === "person") return PARTY_COLOR[d.data.party] || PARTY_COLOR.O;
+        if (d.data.kind === "info") return "rgba(255,255,255,0.03)";
+        return d === root ? "none" : "rgba(255,255,255,0.035)";
+      })
+      .attr("stroke", (d) => {
+        if (d.data.kind === "person") return "rgba(0,0,0,0.35)";
+        if (d.data.kind === "info") return "rgba(255,255,255,0.22)";
+        return d === root ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.13)";
+      })
+      .attr("stroke-dasharray", (d) => (d.data.kind === "info" ? "3 3" : null))
+      .style("cursor", "pointer")
+      .on("mouseover", function (event, d) {
+        d3.select(this).attr("stroke", d.data.kind === "person" ? "#ffffff" : "rgba(255,255,255,0.5)");
+        showTooltip(event, d);
+      })
+      .on("mousemove", (event, d) => showTooltip(event, d))
+      .on("mouseout", function (event, d) {
+        d3.select(this).attr("stroke", d.data.kind === "person" ? "rgba(0,0,0,0.35)"
+          : d.data.kind === "info" ? "rgba(255,255,255,0.22)"
+          : d === root ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.13)");
+        hideTooltip();
+      })
+      .on("click", (event, d) => {
+        event.stopPropagation();
+        hideTooltip();
+        if (d.data.kind === "person" || d.data.kind === "info") {
+          openPanel(d.data);
+          zoom(d.parent && projR(d) < 90 ? d : focus === d.parent ? focus : d.parent || root);
+        } else if (d !== focus) {
+          closePanel();
+          zoom(d);
+        } else if (d.parent) {
+          zoom(d.parent);
+        }
       });
-      if (d.children) {
-        el.append("tspan")
-          .attr("class", "count")
-          .attr("x", 0)
-          .attr("dy", "1.25em")
-          .attr("font-weight", 400)
-          .attr("fill", "#c3c5cc")
-          .text(countLabel(d));
-      }
-    });
+  }
+
+  function applyLabelEnter(sel) {
+    sel
+      .style("display", "none")
+      .attr("fill", (d) => (d.data.kind === "person" ? "#0b0d10" : "#ffffff"))
+      .attr("paint-order", "stroke")
+      .attr("stroke", (d) => (d.data.kind === "person" ? "rgba(255,255,255,0.25)" : "rgba(13,15,19,0.65)"))
+      .attr("stroke-width", (d) => (d.data.kind === "person" ? 0 : 3))
+      .attr("font-weight", 600)
+      .each(function (d) {
+        const lines = wrap(d.data.name, d.data.kind === "person" ? 11 : 14);
+        const el = d3.select(this);
+        const n = lines.length + (d.children ? 1 : 0);
+        lines.forEach((line, i) => {
+          el.append("tspan")
+            .attr("x", 0)
+            .attr("dy", i === 0 ? `${-(n - 1) * 0.55}em` : "1.1em")
+            .text(line);
+        });
+        if (d.children) {
+          el.append("tspan")
+            .attr("class", "count")
+            .attr("x", 0)
+            .attr("dy", "1.25em")
+            .attr("font-weight", 400)
+            .attr("fill", "#c3c5cc")
+            .text(countLabel(d));
+        }
+      });
+  }
+
+  let node, label;
+  function updateVisible() {
+    const visible = computeVisible(focus);
+    node = nodeLayer
+      .selectAll("circle")
+      .data(visible, (d) => d)
+      .join((enter) => enter.append("circle").call(applyNodeEnter));
+    label = labelLayer
+      .selectAll("text")
+      .data(visible, (d) => d)
+      .join((enter) => enter.append("text").call(applyLabelEnter));
+  }
+  updateVisible();
 
   function countLabel(d) {
     const t = d.partyTally;
@@ -185,6 +211,7 @@
   function zoom(d) {
     if (!d) return;
     focus = d;
+    updateVisible();
     const targetView = [focus.x, focus.y, Math.max(focus.r * 2 * (focus.children ? 1.08 : 1.7), 1)];
     const k = S / targetView[2];
 
