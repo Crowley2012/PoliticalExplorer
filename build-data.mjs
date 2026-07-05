@@ -93,7 +93,10 @@ const JUSTICES = [
   ["Ketanji Brown Jackson", "Associate Justice", "Joe Biden", "D", 2022],
 ];
 
-const PARTY_MAP = { Democrat: "D", Democratic: "D", Republican: "R", Independent: "I" };
+const PARTY_MAP = {
+  Democrat: "D", Democratic: "D", "Democratic-Farmer-Labor": "D",
+  Republican: "R", Independent: "I", Nonpartisan: "O",
+};
 
 // `value` sets bubble area (default 1 = one person). Small branches get
 // heavier weights so they stay visible/clickable next to the 537-member Congress.
@@ -248,6 +251,109 @@ const judicial = group("Judicial Branch",
       [["About the district courts", "https://www.uscourts.gov/about-federal-courts/court-role-and-structure"]], 9),
   ]);
 
+// ---- State legislators from Open States bulk CSVs (data/state-legislators/) ----
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') inQuotes = false;
+      else field += c;
+      continue;
+    }
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ",") { row.push(field); field = ""; continue; }
+    if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; continue; }
+    if (c === "\r") continue;
+    field += c;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  const header = rows.shift() || [];
+  return rows
+    .filter((r) => r.length > 1 || r[0] !== "")
+    .map((r) => Object.fromEntries(header.map((h, i) => [h, r[i] ?? ""])));
+}
+
+// A handful of states use a different lower-chamber name/title than the
+// "House of Representatives" / "State Representative" default.
+const LOWER_CHAMBER_OVERRIDES = {
+  CA: ["State Assembly", "Assemblymember"], NY: ["State Assembly", "Assemblymember"],
+  NV: ["Assembly", "Assemblymember"], WI: ["State Assembly", "Assemblymember"],
+  NJ: ["General Assembly", "Assemblymember"],
+  VA: ["House of Delegates", "Delegate"], WV: ["House of Delegates", "Delegate"],
+  MD: ["House of Delegates", "Delegate"],
+};
+
+// Puerto Rico's local parties, fusion-ticket lines (e.g. NY's "Democratic/
+// Working Families"), and other one-offs don't map cleanly onto the federal
+// two-party system, so unmapped parties fall back to "O" (colored neutrally,
+// same as the judiciary) rather than being force-fit into D/R.
+const unmappedParties = new Set();
+function mapParty(raw) {
+  if (PARTY_MAP[raw]) return PARTY_MAP[raw];
+  const primary = raw.split("/")[0];
+  if (PARTY_MAP[primary]) return PARTY_MAP[primary];
+  unmappedParties.add(raw);
+  return "O";
+}
+
+const stateLegByAbbr = {};
+for (const abbr of Object.keys(STATE_NAMES)) {
+  let csv;
+  try {
+    csv = readFileSync(`data/state-legislators/${abbr.toLowerCase()}.csv`, "utf8");
+  } catch {
+    continue; // not fetched, or not covered by Open States (AS, GU, VI, MP)
+  }
+  const stateName = STATE_NAMES[abbr];
+  const [lowerName, lowerTitle] = LOWER_CHAMBER_OVERRIDES[abbr] || ["House of Representatives", "State Representative"];
+  const upper = [], lower = [], unicameral = [];
+  for (const r of parseCSV(csv)) {
+    const party = mapParty(r.current_party);
+    const chamber = r.current_chamber;
+    const title = chamber === "upper" || chamber === "legislature" ? "State Senator" : lowerTitle;
+    const districtLabel = r.current_district ? `, District ${r.current_district}` : "";
+    const p = person({
+      name: r.name,
+      party, partyFull: r.current_party,
+      state: abbr, stateName,
+      role: `${title} — ${stateName}${districtLabel}`,
+      photo: r.image || null,
+      url: (r.links || r.sources || "").split(";")[0] || null,
+      phone: r.capitol_voice || r.district_voice || null,
+    });
+    if (chamber === "legislature") unicameral.push(p);
+    else if (chamber === "upper") upper.push(p);
+    else lower.push(p);
+  }
+  upper.sort(byParty); lower.sort(byParty); unicameral.sort(byParty);
+  stateLegByAbbr[abbr] = { upper, lower, unicameral, lowerName };
+}
+if (unmappedParties.size)
+  console.warn("Unmapped state legislator parties (colored as Other):", [...unmappedParties].join(", "));
+
+function legislatureNode(stateName, abbr) {
+  const leg = stateLegByAbbr[abbr];
+  if (!leg || (!leg.upper.length && !leg.lower.length && !leg.unicameral.length)) {
+    return info(`${stateName} State Legislature`,
+      `${stateName}'s legislature writes state law, sets the budget, and can override the governor's veto.`,
+      [["Legislature overview (Ballotpedia)", `https://ballotpedia.org/${stateName.replace(/ /g, "_")}_State_Legislature`]]);
+  }
+  if (leg.unicameral.length) {
+    return group(`${stateName} Legislature`,
+      `${stateName}'s unicameral, officially nonpartisan legislature — ${leg.unicameral.length} state senators elected on a nonpartisan ballot.`,
+      leg.unicameral, { badge: partyCount(leg.unicameral) });
+  }
+  return group(`${stateName} Legislature`,
+    `${stateName}'s bicameral legislature writes state law, sets the budget, and can override the governor's veto. ${leg.upper.length + leg.lower.length} members total.`,
+    [
+      group("State Senate", `${leg.upper.length} members. ${partyCount(leg.upper)}.`, leg.upper, { badge: partyCount(leg.upper) }),
+      group(leg.lowerName, `${leg.lower.length} members. ${partyCount(leg.lower)}.`, leg.lower, { badge: partyCount(leg.lower) }),
+    ]);
+}
+
 // ---- States & local ----
 const senByState = {};
 senators.forEach(s => (senByState[s.state] ||= []).push(s));
@@ -265,11 +371,7 @@ const stateNodes = GOVERNORS.map(([stateName, gov, party, year]) => {
       description: `Chief executive of ${stateName}, in office since ${year}. Signs or vetoes state legislation, commands the state National Guard, and appoints state officials.`,
       url: `https://ballotpedia.org/${gov.replace(/ /g, "_")}`,
     }),
-    info(`${stateName} State Legislature`,
-      stateName === "Nebraska"
-        ? "Nebraska is the only state with a unicameral (single-chamber), officially nonpartisan legislature of 49 senators."
-        : `${stateName}'s bicameral legislature — a State Senate and a lower house — writes state law, sets the state budget, and can override the governor's veto.`,
-      [["Legislature overview (Ballotpedia)", `https://ballotpedia.org/${stateName.replace(/ /g, "_")}_State_Legislature`]]),
+    legislatureNode(stateName, abbr),
     group(`Congressional Delegation`,
       `${stateName}'s members of the U.S. Congress. (Also listed under the Legislative Branch.)`,
       [...(senByState[abbr] || []), ...(repByState[abbr] || [])].map(p => ({ ...p, crossRef: true }))),
@@ -311,4 +413,5 @@ const out = { asOf: DATA_AS_OF, root: rootNode };
 writeFileSync("data.js", "window.GOV_DATA = " + JSON.stringify(out) + ";\n");
 
 const count = (n) => 1 + (n.children ? n.children.reduce((a, c) => a + count(c), 0) : 0);
-console.log(`Wrote data.js — ${count(rootNode)} nodes, ${senators.length} senators, ${reps.length} house members.`);
+const stateLegCount = Object.values(stateLegByAbbr).reduce((a, s) => a + s.upper.length + s.lower.length + s.unicameral.length, 0);
+console.log(`Wrote data.js — ${count(rootNode)} nodes, ${senators.length} senators, ${reps.length} house members, ${stateLegCount} state legislators.`);

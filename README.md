@@ -32,9 +32,10 @@ npx serve .          # or: python -m http.server 8000
 - **Search** (`/` to focus) finds any person, state, or office by name.
 - The **info card** (bottom-left) describes whatever you're focused on and
   shows its party-split bar.
-- **States & Local Government** → any state → its governor, state legislature,
-  congressional delegation, and a Local Government node with links for finding
-  county/municipal officials (there are too many thousands to enumerate).
+- **States & Local Government** → any state → its governor, state legislature
+  (every state senator and representative), congressional delegation, and a
+  Local Government node with links for finding county/municipal officials
+  (there are too many thousands to enumerate).
 
 ## Data
 
@@ -44,11 +45,13 @@ npx serve .          # or: python -m http.server 8000
 | President, VP, Cabinet | curated in `build-data.mjs` | verified 2026-07-05 |
 | Supreme Court | curated in `build-data.mjs` | verified 2026-07-05 |
 | 50 governors | curated in `build-data.mjs` | verified 2026-07-05 |
+| State legislators (~7,450) | [Open States](https://openstates.org) bulk CSVs (`data/state-legislators/`) | re-downloadable anytime |
 
 ### Updating the data
 
 ```
 curl -L -o data/legislators-current.json https://unitedstates.github.io/congress-legislators/legislators-current.json
+node fetch-state-legislators.mjs   # downloads data/state-legislators/<abbr>.csv for every state
 node build-data.mjs        # regenerates data.js (the file the app loads)
 ```
 
@@ -59,5 +62,6 @@ of `build-data.mjs` and re-run it.
 
 - `index.html` / `styles.css` / `app.js` — the app (D3 v7 zoomable circle packing)
 - `build-data.mjs` — transforms the raw dataset + curated tables into `data.js`
+- `fetch-state-legislators.mjs` — downloads current state legislator rosters from Open States
 - `data.js` — generated hierarchy the app loads (don't edit by hand)
 - `lib/d3.min.js` — vendored D3, so the app works without a network
