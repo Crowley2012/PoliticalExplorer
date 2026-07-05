@@ -191,7 +191,7 @@ kbd {
 }
 #panel-close:hover { color: var(--ink); border-color: var(--ink-3); }
 
-.p-photo-wrap { height: 210px; overflow: hidden; border-radius: var(--radius) var(--radius) 0 0; position: relative; }
+.p-photo-wrap { aspect-ratio: 3 / 4; overflow: hidden; border-radius: var(--radius) var(--radius) 0 0; position: relative; }
 .p-photo { width: 100%; height: 100%; object-fit: cover; object-position: top center; display: block; }
 .p-monogram {
   height: 130px;
