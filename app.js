@@ -47,6 +47,115 @@
     .attr("viewBox", `${-S / 2} ${-S / 2} ${S} ${S}`)
     .on("click", () => zoom(focus.parent || root));
 
+  // ---------- group texture (restores the "nested bubbles" look cheaply) ----------
+  // Unfocused group circles (states, chambers, delegations, ...) used to be full
+  // subtrees of live circles, which is what made the map feel dense and alive —
+  // but rendering all ~8,800 descendants at all times was the source of the jank
+  // that the virtualization above fixes. Instead, bake each group's party makeup
+  // into a small cached dot-grid image and use it as an SVG pattern fill: it scales
+  // for free with the circle (objectBoundingBox units), costs nothing per animation
+  // frame, and needs no extra live DOM nodes.
+  const defs = svg.append("defs");
+  const patternCache = new Map();
+
+  // deterministic shuffle so same-size grids always scatter the same way
+  function shuffledIndices(n, seed) {
+    const arr = Array.from({ length: n }, (_, i) => i);
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  // Largest-remainder rounding: cell counts always sum to exactly `cells`, so
+  // the grid reads as fully packed (like a real pack layout) at any member count.
+  function distributeCells(t, total, cells) {
+    const parties = ["D", "R", "I", "O"];
+    const raw = parties.map((p) => (t[p] / total) * cells);
+    const counts = raw.map(Math.floor);
+    let remaining = cells - counts.reduce((a, b) => a + b, 0);
+    const order = raw
+      .map((v, i) => [v - Math.floor(v), i])
+      .sort((a, b) => b[0] - a[0]);
+    for (let i = 0; i < remaining; i++) counts[order[i % order.length][1]]++;
+    const result = {};
+    parties.forEach((p, i) => (result[p] = counts[i]));
+    return result;
+  }
+
+  // Represent the group as a small pack of leaf "member" circles, scaled down
+  // proportionally when real membership is large (capped for perf/legibility).
+  // A genuine d3.pack() layout tapers to its own boundary by construction —
+  // no manual edge-fade hack needed — and needs far fewer shapes than a dense
+  // grid for the same visual density, so it reads as organic rather than a
+  // grid clipped to a circle, and is cheap to bake even for huge chambers.
+  const PACK_CANVAS = 380;
+  function renderDotTexture(t, total) {
+    const n = Math.max(6, Math.min(70, Math.round(Math.sqrt(total) * 2)));
+    const counts = distributeCells(t, total, n);
+    const parties = [];
+    ["D", "R", "I", "O"].forEach((p) => {
+      for (let i = 0; i < counts[p]; i++) parties.push(p);
+    });
+    const order = shuffledIndices(n, 42);
+    const leaves = order.map((srcIdx) => ({ party: parties[srcIdx] }));
+
+    const packRoot = d3
+      .pack()
+      .size([200, 200])
+      .padding(1)(d3.hierarchy({ children: leaves }).sum(() => 1));
+
+    const c0 = PACK_CANVAS / 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = PACK_CANVAS;
+    canvas.height = PACK_CANVAS;
+    const ctx = canvas.getContext("2d");
+    // normalize by the pack's own enclosing circle so it lines up exactly
+    // with the bounding box's inscribed circle (the real SVG circle)
+    packRoot.children.forEach((leaf) => {
+      const nx = (leaf.x - packRoot.x) / packRoot.r;
+      const ny = (leaf.y - packRoot.y) / packRoot.r;
+      const nr = leaf.r / packRoot.r;
+      ctx.beginPath();
+      ctx.arc(c0 + nx * c0, c0 + ny * c0, nr * c0, 0, Math.PI * 2);
+      ctx.fillStyle = PARTY_COLOR[leaf.data.party];
+      ctx.fill();
+    });
+    return canvas.toDataURL();
+  }
+
+  function textureFill(d) {
+    if (!d.children) return null;
+    const t = d.partyTally;
+    const total = t.D + t.R + t.I + t.O;
+    if (!total) return null;
+    const key = `${t.D},${t.R},${t.I},${t.O}`;
+    let ref = patternCache.get(key);
+    if (!ref) {
+      const id = "tex-" + patternCache.size;
+      const pattern = defs
+        .append("pattern")
+        .attr("id", id)
+        .attr("patternUnits", "objectBoundingBox")
+        .attr("patternContentUnits", "objectBoundingBox")
+        .attr("width", 1)
+        .attr("height", 1);
+      pattern
+        .append("image")
+        .attr("x", 0)
+        .attr("y", 0)
+        .attr("width", 1)
+        .attr("height", 1)
+        .attr("preserveAspectRatio", "xMidYMid slice")
+        .attr("href", renderDotTexture(t, total));
+      ref = `url(#${id})`;
+      patternCache.set(key, ref);
+    }
+    return ref;
+  }
+
   // ---------- circles & labels (virtualized) ----------
   // Only the focused node's ancestor chain, each ancestor's siblings, and the
   // focus's own children ever need DOM elements — anything further away is
@@ -67,14 +176,39 @@
   const nodeLayer = svg.append("g");
   const labelLayer = svg.append("g").attr("pointer-events", "none").attr("text-anchor", "middle");
 
+  // While the zoom transition is actively resizing circles, Chromium visibly
+  // lags/stretches raster <image> pattern content behind the animating
+  // bounding box (a burst of dozens of newly-baked patterns all resizing at
+  // once looks like a messy hex-cluster smear). The flat fill has no raster
+  // content to stretch, so it stays clean at any size — texture is only
+  // worth paying for once the shape has stopped moving.
+  let isZooming = false;
+  function fillFor(d) {
+    if (d.data.kind === "person") return PARTY_COLOR[d.data.party] || PARTY_COLOR.O;
+    if (d.data.kind === "info") return "rgba(255,255,255,0.03)";
+    if (d === root) return "none";
+    // The current focus always has its real children rendered live on top of
+    // it (that's the whole point of the focus/drill-down). A baked texture
+    // underneath doesn't line up with those real circles' actual positions,
+    // so it shows through the gaps as a mismatched, cracked-looking overlay.
+    if (d === focus) return "rgba(255,255,255,0.035)";
+    if (isZooming) return "rgba(255,255,255,0.035)";
+    // computeVisible keeps more than just focus's children on screen — every
+    // ancestor's other children ride along too, purely as background context
+    // (so e.g. Senate/Executive Branch/States are still visible while you're
+    // deep inside the House). Those "cousins" share the same zoom transform,
+    // so once you're zoomed in close they can render enormous — a busy dot
+    // texture on something that huge doesn't read as decoration, it visually
+    // overlaps and clashes with the real circles you're actually looking at.
+    // Texture is only worth it for the children of the thing you're browsing.
+    if (d.parent !== focus) return "rgba(255,255,255,0.035)";
+    return textureFill(d) || "rgba(255,255,255,0.035)";
+  }
+
   function applyNodeEnter(sel) {
     sel
       .attr("class", (d) => "n-" + (d.data.kind || "group"))
-      .attr("fill", (d) => {
-        if (d.data.kind === "person") return PARTY_COLOR[d.data.party] || PARTY_COLOR.O;
-        if (d.data.kind === "info") return "rgba(255,255,255,0.03)";
-        return d === root ? "none" : "rgba(255,255,255,0.035)";
-      })
+      .attr("fill", fillFor)
       .attr("stroke", (d) => {
         if (d.data.kind === "person") return "rgba(0,0,0,0.35)";
         if (d.data.kind === "info") return "rgba(255,255,255,0.22)";
@@ -144,7 +278,8 @@
     node = nodeLayer
       .selectAll("circle")
       .data(visible, (d) => d)
-      .join((enter) => enter.append("circle").call(applyNodeEnter));
+      .join((enter) => enter.append("circle").call(applyNodeEnter))
+      .attr("fill", fillFor); // re-evaluate for nodes whose ancestor-or-self relationship to focus changed
     label = labelLayer
       .selectAll("text")
       .data(visible, (d) => d)
@@ -211,9 +346,10 @@
   function zoom(d) {
     if (!d) return;
     focus = d;
-    updateVisible();
     const targetView = [focus.x, focus.y, Math.max(focus.r * 2 * (focus.children ? 1.08 : 1.7), 1)];
     const k = S / targetView[2];
+    isZooming = true;
+    updateVisible();
 
     label.attr("fill-opacity", 0).style("display", "none");
 
@@ -224,7 +360,11 @@
         const i = d3.interpolateZoom(view, targetView);
         return (t) => zoomTo(i(t));
       })
-      .on("end", () => updateLabels(k));
+      .on("end", () => {
+        isZooming = false;
+        node.attr("fill", fillFor); // swap flat-during-zoom fills for real texture now that sizes are settled
+        updateLabels(k);
+      });
 
     renderCrumbs();
     renderInfobar();
