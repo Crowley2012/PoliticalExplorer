@@ -372,9 +372,16 @@ const stateNodes = GOVERNORS.map(([stateName, gov, party, year]) => {
       url: `https://ballotpedia.org/${gov.replace(/ /g, "_")}`,
     }),
     legislatureNode(stateName, abbr),
-    group(`Congressional Delegation`,
-      `${stateName}'s members of the U.S. Congress. (Also listed under the Legislative Branch.)`,
-      [...(senByState[abbr] || []), ...(repByState[abbr] || [])].map(p => ({ ...p, crossRef: true }))),
+    (() => {
+      const sens = (senByState[abbr] || []).map(p => ({ ...p, crossRef: true }));
+      const reps = (repByState[abbr] || []).map(p => ({ ...p, crossRef: true }));
+      return group(`Congressional Delegation`,
+        `${stateName}'s members of the U.S. Congress. (Also listed under the Legislative Branch.)`,
+        [
+          group("U.S. Senate", `${sens.length} member${sens.length === 1 ? "" : "s"}. ${partyCount(sens)}.`, sens, { badge: partyCount(sens) }),
+          group("U.S. House of Representatives", `${reps.length} member${reps.length === 1 ? "" : "s"}. ${partyCount(reps)}.`, reps, { badge: partyCount(reps) }),
+        ]);
+    })(),
     info("Local Government",
       `Below the state level, ${stateName} is governed by counties (boards of commissioners or supervisors, sheriffs, district attorneys), municipalities (mayors and city councils), school boards, and special districts. Thousands of these officials are elected locally — find yours with the links here.`,
       [
