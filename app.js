@@ -3,6 +3,7 @@
   "use strict";
 
   const DATA = window.GOV_DATA;
+  const COUNTY_INDEX = window.COUNTY_INDEX || [];
   const S = 1400; // pack layout size (viewBox units)
 
   const PARTY_COLOR = { D: "#3987e5", R: "#e66767", I: "#c98500", O: "#898781" };
@@ -16,8 +17,12 @@
     d3.hierarchy(DATA.root).sum((d) => (d.children ? 0 : d.value || 1))
   );
 
+  // stable per-node ids so keyed joins survive dynamic splices (see refreshSelections)
+  let nextId = 0;
+  root.each((d) => (d.id = nextId++));
+
   // party tallies per node (descendant persons)
-  root.eachAfter((d) => {
+  function tallyReducer(d) {
     const t = { D: 0, R: 0, I: 0, O: 0 };
     if (d.children) {
       d.children.forEach((c) => {
@@ -27,7 +32,8 @@
       t[d.data.party] = 1;
     }
     d.partyTally = t;
-  });
+  }
+  root.eachAfter(tallyReducer);
 
   // The root would double-count members of Congress (they also appear inside
   // their state's Congressional Delegation), so tally it from canonical people only.
@@ -47,91 +53,127 @@
     .attr("viewBox", `${-S / 2} ${-S / 2} ${S} ${S}`)
     .on("click", () => zoom(focus.parent || root));
 
-  // ---------- circles ----------
+  // ---------- circles & labels ----------
   // nodeLayer gets one shared transform per zoom frame instead of rewriting
-  // transform/r on all 8,840+ circles every frame — cx/cy/r are static pack
-  // coordinates set once below.
+  // transform/r on all circles every frame — cx/cy/r are static pack
+  // coordinates set once per node (refreshed only on boot / a county splice).
   const nodeLayer = svg.append("g");
-  const node = nodeLayer
-    .selectAll("circle")
-    .data(root.descendants())
-    .join("circle")
-    .attr("cx", (d) => d.x)
-    .attr("cy", (d) => d.y)
-    .attr("r", (d) => Math.max(d.r, 0.1))
-    .attr("vector-effect", "non-scaling-stroke")
-    .attr("class", (d) => "n-" + (d.data.kind || "group"))
-    .attr("fill", (d) => {
-      if (d.data.kind === "person") return PARTY_COLOR[d.data.party] || PARTY_COLOR.O;
-      if (d.data.kind === "info") return "rgba(255,255,255,0.03)";
-      return d === root ? "none" : "rgba(255,255,255,0.035)";
-    })
-    .attr("stroke", (d) => {
-      if (d.data.kind === "person") return "rgba(0,0,0,0.35)";
-      if (d.data.kind === "info") return "rgba(255,255,255,0.22)";
-      return d === root ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.13)";
-    })
-    .attr("stroke-dasharray", (d) => (d.data.kind === "info" ? "3 3" : null))
-    .style("cursor", "pointer")
-    .on("mouseover", function (event, d) {
-      d3.select(this).attr("stroke", d.data.kind === "person" ? "#ffffff" : "rgba(255,255,255,0.5)");
-      showTooltip(event, d);
-    })
-    .on("mousemove", (event, d) => showTooltip(event, d))
-    .on("mouseout", function (event, d) {
-      d3.select(this).attr("stroke", d.data.kind === "person" ? "rgba(0,0,0,0.35)"
-        : d.data.kind === "info" ? "rgba(255,255,255,0.22)"
-        : d === root ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.13)");
-      hideTooltip();
-    })
-    .on("click", (event, d) => {
-      event.stopPropagation();
-      hideTooltip();
-      if (d.data.kind === "person" || d.data.kind === "info") {
-        openPanel(d.data);
-        zoom(d.parent && projR(d) < 90 ? d : focus === d.parent ? focus : d.parent || root);
-      } else if (d !== focus) {
-        closePanel();
-        zoom(d);
-      } else if (d.parent) {
-        zoom(d.parent);
-      }
-    });
+  const labelLayer = svg.append("g").attr("pointer-events", "none").attr("text-anchor", "middle");
 
-  // ---------- labels ----------
-  const label = svg
-    .append("g")
-    .attr("pointer-events", "none")
-    .attr("text-anchor", "middle")
-    .selectAll("text")
-    .data(root.descendants())
-    .join("text")
-    .style("display", "none")
-    .attr("fill", (d) => (d.data.kind === "person" ? "#0b0d10" : "#ffffff"))
-    .attr("paint-order", "stroke")
-    .attr("stroke", (d) => (d.data.kind === "person" ? "rgba(255,255,255,0.25)" : "rgba(13,15,19,0.65)"))
-    .attr("stroke-width", (d) => (d.data.kind === "person" ? 0 : 3))
-    .attr("font-weight", 600)
-    .each(function (d) {
-      const lines = wrap(d.data.name, d.data.kind === "person" ? 11 : 14);
-      const el = d3.select(this);
-      const n = lines.length + (d.children ? 1 : 0);
-      lines.forEach((line, i) => {
-        el.append("tspan")
-          .attr("x", 0)
-          .attr("dy", i === 0 ? `${-(n - 1) * 0.55}em` : "1.1em")
-          .text(line);
+  let node, label;
+
+  function circleFillColor(d) {
+    if (d.data.kind === "person") return PARTY_COLOR[d.data.party] || PARTY_COLOR.O;
+    if (d.data.kind === "info") return "rgba(255,255,255,0.03)";
+    return d === root ? "none" : "rgba(255,255,255,0.035)";
+  }
+  function circleStrokeColor(d) {
+    if (d.data.kind === "person") return "rgba(0,0,0,0.35)";
+    if (d.data.kind === "info") return "rgba(255,255,255,0.22)";
+    return d === root ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.13)";
+  }
+
+  function styleCircleEnter(sel) {
+    return sel
+      .attr("cx", (d) => d.x)
+      .attr("cy", (d) => d.y)
+      .attr("r", (d) => Math.max(d.r, 0.1))
+      .attr("vector-effect", "non-scaling-stroke")
+      .style("cursor", "pointer")
+      .on("mouseover", function (event, d) {
+        d3.select(this).attr("stroke", d.data.kind === "person" ? "#ffffff" : "rgba(255,255,255,0.5)");
+        showTooltip(event, d);
+      })
+      .on("mousemove", (event, d) => showTooltip(event, d))
+      .on("mouseout", function (event, d) {
+        d3.select(this).attr("stroke", circleStrokeColor(d));
+        hideTooltip();
+      })
+      .on("click", (event, d) => {
+        event.stopPropagation();
+        hideTooltip();
+        if (d.data.kind === "person" || d.data.kind === "info") {
+          openPanel(d.data);
+          zoom(d.parent && projR(d) < 90 ? d : focus === d.parent ? focus : d.parent || root);
+        } else if (d.data.localGov) {
+          // county-finder group (pre- or post-splice): keep the finder panel reachable
+          openPanel(d.data);
+          if (d !== focus) zoom(d);
+        } else if (d !== focus) {
+          closePanel();
+          zoom(d);
+        } else if (d.parent) {
+          zoom(d.parent);
+        }
       });
-      if (d.children) {
-        el.append("tspan")
-          .attr("class", "count")
-          .attr("x", 0)
-          .attr("dy", "1.25em")
-          .attr("font-weight", 400)
-          .attr("fill", "#c3c5cc")
-          .text(countLabel(d));
-      }
+  }
+
+  function styleCircleVisual(sel) {
+    return sel
+      .attr("class", (d) => "n-" + (d.data.kind || "group"))
+      .attr("fill", circleFillColor)
+      .attr("stroke", circleStrokeColor)
+      .attr("stroke-dasharray", (d) => (d.data.kind === "info" ? "3 3" : null));
+  }
+
+  function styleLabelEnter(sel) {
+    return sel
+      .style("display", "none")
+      .attr("fill", (d) => (d.data.kind === "person" ? "#0b0d10" : "#ffffff"))
+      .attr("paint-order", "stroke")
+      .attr("stroke", (d) => (d.data.kind === "person" ? "rgba(255,255,255,0.25)" : "rgba(13,15,19,0.65)"))
+      .attr("stroke-width", (d) => (d.data.kind === "person" ? 0 : 3))
+      .attr("font-weight", 600);
+  }
+
+  function rebuildLabelContent(el, d) {
+    const sel = d3.select(el);
+    sel.selectAll("tspan").remove();
+    const lines = wrap(d.data.name, d.data.kind === "person" ? 11 : 14);
+    const n = lines.length + (d.children ? 1 : 0);
+    lines.forEach((line, i) => {
+      sel
+        .append("tspan")
+        .attr("x", 0)
+        .attr("dy", i === 0 ? `${-(n - 1) * 0.55}em` : "1.1em")
+        .text(line);
     });
+    if (d.children) {
+      sel
+        .append("tspan")
+        .attr("class", "count")
+        .attr("x", 0)
+        .attr("dy", "1.25em")
+        .attr("font-weight", 400)
+        .attr("fill", "#c3c5cc")
+        .text(countLabel(d));
+    }
+  }
+
+  function refreshSelections() {
+    const nodes = root.descendants();
+
+    node = nodeLayer
+      .selectAll("circle")
+      .data(nodes, (d) => d.id)
+      .join(
+        (enter) => styleCircleVisual(styleCircleEnter(enter.append("circle"))),
+        (update) => styleCircleVisual(update),
+        (exit) => exit.remove()
+      );
+
+    label = labelLayer
+      .selectAll("text")
+      .data(nodes, (d) => d.id)
+      .join(
+        (enter) => styleLabelEnter(enter.append("text")),
+        (update) => update,
+        (exit) => exit.remove()
+      );
+    label.each(function (d) {
+      rebuildLabelContent(this, d);
+    });
+  }
 
   function countLabel(d) {
     const t = d.partyTally;
@@ -157,6 +199,8 @@
     if (cur) lines.push(cur);
     return lines.slice(0, 3);
   }
+
+  refreshSelections();
 
   // ---------- zoom ----------
   function projR(d) {
@@ -312,6 +356,7 @@
         img.closest(".p-photo-wrap").outerHTML = monogramHTML(p);
       });
     }
+    if (p.localGov) wireCountyFinder(p);
   }
   function closePanel() {
     panel.hidden = true;
@@ -341,7 +386,11 @@
     if (p.phone) rows.push(["Phone", p.phone]);
 
     const links = [];
-    if (p.url) links.push([p.url.includes("ballotpedia") ? "Ballotpedia profile" : "Official website", p.url]);
+    if (p.url)
+      links.push([
+        p.url.includes("ballotpedia") ? "Ballotpedia profile" : p.url.includes("wikidata.org") ? "Wikidata profile" : "Official website",
+        p.url,
+      ]);
     if (p.congressUrl) links.push(["Congress.gov profile", p.congressUrl]);
     if (p.bioguide) links.push(["Voting record (GovTrack)", `https://www.govtrack.us/congress/members/${p.bioguide}`]);
 
@@ -363,24 +412,247 @@
 
   function infoHTML(p) {
     const links = (p.links || []).map(([t, u]) => `<a href="${u}" target="_blank" rel="noopener">${esc(t)}</a>`).join("");
+    const finder = p.localGov
+      ? `
+      <div class="county-finder">
+        <label for="county-input">Find your county</label>
+        <div class="county-finder-row">
+          <input id="county-input" list="county-datalist" placeholder="e.g. Travis County, Texas" autocomplete="off" spellcheck="false">
+          <button id="county-go" type="button">Go</button>
+        </div>
+        <div id="county-status" class="county-status"></div>
+      </div>`
+      : "";
     return `
       <div class="p-body" style="padding-top:40px">
         <div class="p-name">${esc(p.name)}</div>
         ${p.description ? `<div class="p-desc" style="margin-top:4px">${esc(p.description)}</div>` : ""}
         ${links ? `<div class="p-links">${links}</div>` : ""}
+        ${finder}
       </div>`;
+  }
+
+  // ---------- county lookup (live Wikidata query + dynamic splice) ----------
+  function mapWikidataParty(label) {
+    if (!label) return "O";
+    const l = label.toLowerCase();
+    if (l.includes("democratic")) return "D";
+    if (l.includes("republican")) return "R";
+    if (l.includes("independent")) return "I";
+    return "O";
+  }
+
+  async function fetchCountyMayors(qid) {
+    const cacheKey = `county-mayors:${qid}`;
+    const cached = sessionStorage.getItem(cacheKey);
+    if (cached) return JSON.parse(cached);
+
+    const query = `
+      SELECT ?city ?cityLabel ?mayor ?mayorLabel ?start ?partyLabel WHERE {
+        ?city wdt:P131 wd:${qid} .
+        ?city wdt:P31/wdt:P279* wd:Q515 .
+        OPTIONAL {
+          ?city p:P6 ?stmt .
+          ?stmt ps:P6 ?mayor .
+          FILTER NOT EXISTS { ?stmt pq:P582 ?end }
+          OPTIONAL { ?stmt pq:P580 ?start }
+          OPTIONAL { ?mayor wdt:P102 ?party }
+        }
+        SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+      }
+    `;
+
+    let result;
+    try {
+      const res = await fetch(`https://query.wikidata.org/sparql?query=${encodeURIComponent(query)}`, {
+        headers: { Accept: "application/sparql-results+json" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+
+      const byCity = new Map();
+      for (const b of json.results.bindings) {
+        const cqid = b.city.value.split("/").pop();
+        if (!byCity.has(cqid)) byCity.set(cqid, { qid: cqid, name: b.cityLabel.value, mayor: null });
+        if (b.mayor) {
+          byCity.get(cqid).mayor = {
+            qid: b.mayor.value.split("/").pop(),
+            name: b.mayorLabel.value,
+            start: b.start ? b.start.value.slice(0, 10) : null,
+            party: mapWikidataParty(b.partyLabel && b.partyLabel.value),
+          };
+        }
+      }
+      const cities = [...byCity.values()].sort((a, b) => a.name.localeCompare(b.name));
+      result = cities.length ? { ok: true, cities } : { ok: false, reason: "empty" };
+    } catch (e) {
+      result = { ok: false, reason: "network" };
+    }
+    if (result.ok) sessionStorage.setItem(cacheKey, JSON.stringify(result));
+    return result;
+  }
+
+  function citiesToNodeData(cities) {
+    return cities.map((city) => {
+      if (city.mayor) {
+        return {
+          kind: "person",
+          value: 1.4,
+          name: city.mayor.name,
+          party: city.mayor.party,
+          role: `Mayor of ${city.name}`,
+          description: `Mayor of ${city.name}. Sourced live from Wikidata.`,
+          termStart: city.mayor.start || "",
+          url: `https://www.wikidata.org/wiki/${city.mayor.qid}`,
+        };
+      }
+      return {
+        kind: "info",
+        value: 1,
+        name: city.name,
+        description: `${city.name} — current mayor not listed on Wikidata.`,
+        links: [[`${city.name} on Wikidata`, `https://www.wikidata.org/wiki/${city.qid}`]],
+      };
+    });
+  }
+
+  function packAndRemap(cityNodeData, targetNode) {
+    const localRoot = d3.hierarchy({ children: cityNodeData }).sum((d) => (d.children ? 0 : d.value || 1));
+    d3.pack().size([S, S]).padding(5)(localRoot);
+
+    // Capture the local root's own coordinates before mutating anything —
+    // .each() visits the root before its children, so writing into
+    // localRoot.x/y first would corrupt every child's remap below.
+    const { x: lx, y: ly, r: lr } = localRoot;
+    const scale = targetNode.r / lr;
+    localRoot.each((n) => {
+      n.x = targetNode.x + (n.x - lx) * scale;
+      n.y = targetNode.y + (n.y - ly) * scale;
+      n.r = n.r * scale;
+    });
+
+    const depthDelta = targetNode.depth; // local children (depth 1) land at targetNode.depth + 1
+    localRoot.children.forEach((c) => {
+      c.each((d) => {
+        d.depth += depthDelta;
+      });
+      c.parent = targetNode;
+    });
+    return localRoot.children;
+  }
+
+  function isDescendantOf(d, ancestor) {
+    let p = d;
+    while (p) {
+      if (p === ancestor) return true;
+      p = p.parent;
+    }
+    return false;
+  }
+
+  function afterSplicePartyTally(node, oldTally) {
+    const delta = {};
+    for (const k in node.partyTally) delta[k] = node.partyTally[k] - oldTally[k];
+    let anc = node.parent;
+    while (anc) {
+      for (const k in delta) anc.partyTally[k] += delta[k];
+      anc = anc.parent;
+    }
+  }
+
+  function spliceCounty(targetNode, countyMeta, cities) {
+    const newChildren = packAndRemap(citiesToNodeData(cities), targetNode);
+
+    removeFromSearchable(targetNode);
+    const oldTally = targetNode.partyTally;
+
+    targetNode.data = {
+      kind: "group",
+      name: `${countyMeta.name} — Cities`,
+      description: `Cities in ${countyMeta.name}, ${countyMeta.stateName} and their current mayors, live from Wikidata.`,
+      localGov: true,
+      stateAbbr: targetNode.data.stateAbbr,
+      stateNameFull: targetNode.data.stateNameFull,
+      links: targetNode.data.links,
+    };
+    targetNode.children = newChildren;
+    targetNode.each((d) => {
+      if (d !== targetNode) d.id = nextId++;
+    });
+
+    targetNode.eachAfter(tallyReducer);
+    afterSplicePartyTally(targetNode, oldTally);
+
+    addToSearchable(targetNode.descendants());
+    refreshSelections();
+  }
+
+  function wireCountyFinder(p) {
+    const targetNode = root.descendants().find((d) => d.data === p);
+    if (!targetNode) return;
+    const input = document.getElementById("county-input");
+    const btn = document.getElementById("county-go");
+    const status = document.getElementById("county-status");
+
+    btn.addEventListener("click", runLookup);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") runLookup();
+    });
+
+    async function runLookup() {
+      const typed = input.value.trim();
+      if (!typed) return;
+      const match = COUNTY_INDEX.find(
+        (c) => c.label.toLowerCase() === typed.toLowerCase() && c.state === p.stateAbbr
+      );
+      if (!match) {
+        status.className = "county-status error";
+        status.textContent = `Couldn't find "${typed}" in ${p.stateNameFull}. Pick a suggestion from the list.`;
+        return;
+      }
+      status.className = "county-status";
+      status.textContent = `Looking up cities in ${match.name}…`;
+      btn.disabled = true;
+
+      const result = await fetchCountyMayors(match.qid);
+      btn.disabled = false;
+
+      if (!result.ok) {
+        status.className = "county-status error";
+        status.textContent =
+          result.reason === "empty"
+            ? `No cities with Wikidata mayor data found in ${match.name}.`
+            : `Couldn't reach Wikidata — check your connection and try again.`;
+        return;
+      }
+
+      spliceCounty(targetNode, match, result.cities);
+      status.className = "county-status success";
+      status.textContent = `Loaded ${result.cities.length} cities in ${match.name}.`;
+      closePanel();
+      zoom(targetNode);
+    }
   }
 
   // ---------- search ----------
   const searchInput = document.getElementById("search");
   const searchResults = document.getElementById("search-results");
-  const searchable = root
-    .descendants()
-    .filter((d) => !d.data.crossRef && (d.data.kind === "person" || d.data.isState || d.children))
-    .map((d) => ({
-      d,
-      hay: `${d.data.name} ${d.data.stateName || ""} ${d.data.state || ""} ${d.data.role || ""}`.toLowerCase(),
-    }));
+  let searchable = [];
+  function addToSearchable(nodes) {
+    nodes
+      .filter((d) => !d.data.crossRef && (d.data.kind === "person" || d.data.isState || d.children))
+      .forEach((d) => {
+        searchable.push({
+          d,
+          hay: `${d.data.name} ${d.data.stateName || ""} ${d.data.state || ""} ${d.data.role || ""}`.toLowerCase(),
+        });
+      });
+  }
+  function removeFromSearchable(targetNode) {
+    searchable = searchable.filter((s) => !isDescendantOf(s.d, targetNode));
+  }
+  addToSearchable(root.descendants());
+
   let activeIdx = -1;
   let hits = [];
 
@@ -425,6 +697,9 @@
     searchInput.value = "";
     searchInput.blur();
     if (d.data.kind === "person" || d.data.kind === "info") {
+      openPanel(d.data);
+      zoom(d);
+    } else if (d.data.localGov) {
       openPanel(d.data);
       zoom(d);
     } else {
@@ -476,6 +751,11 @@
   }
 
   // ---------- boot ----------
+  const countyDatalist = document.getElementById("county-datalist");
+  if (countyDatalist) {
+    countyDatalist.innerHTML = COUNTY_INDEX.map((c) => `<option value="${esc(c.label)}">`).join("");
+  }
+
   asof.textContent = `Data as of ${fmtDate(DATA.asOf)} · congress-legislators (unitedstates.github.io)`;
   zoomTo(view);
   updateLabels(S / view[2]);

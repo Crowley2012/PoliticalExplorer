@@ -382,12 +382,19 @@ const stateNodes = GOVERNORS.map(([stateName, gov, party, year]) => {
           group("U.S. House of Representatives", `${reps.length} member${reps.length === 1 ? "" : "s"}. ${partyCount(reps)}.`, reps, { badge: partyCount(reps) }),
         ]);
     })(),
-    info("Local Government",
-      `Below the state level, ${stateName} is governed by counties (boards of commissioners or supervisors, sheriffs, district attorneys), municipalities (mayors and city councils), school boards, and special districts. Thousands of these officials are elected locally — find yours with the links here.`,
-      [
+    {
+      kind: "info",
+      name: "Local Government",
+      value: 2,
+      localGov: true,
+      stateAbbr: abbr,
+      stateNameFull: stateName,
+      description: `Below the state level, ${stateName} is governed by counties (boards of commissioners or supervisors, sheriffs, district attorneys), municipalities (mayors and city councils), school boards, and special districts. Thousands of these officials are elected locally — type your county above to look up its cities and mayors, or find yours with the links here.`,
+      links: [
         ["Find your local officials (USA.gov)", "https://www.usa.gov/local-governments"],
         [`${stateName} local politics (Ballotpedia)`, `https://ballotpedia.org/${stateName.replace(/ /g, "_")}`],
-      ]),
+      ],
+    },
   ];
   return group(stateName, `The State of ${stateName} — governor, legislature, congressional delegation, and local government.`, kids, { isState: true });
 });
@@ -418,6 +425,21 @@ const rootNode = group("United States Government",
 
 const out = { asOf: DATA_AS_OF, root: rootNode };
 writeFileSync("data.js", "window.GOV_DATA = " + JSON.stringify(out) + ";\n");
+
+// ---- County index (for the county-finder autocomplete) ----
+const NAME_TO_ABBR = Object.fromEntries(Object.entries(STATE_NAMES).map(([k, v]) => [v, k]));
+const counties = JSON.parse(readFileSync("data/counties.json", "utf8"));
+const countyIndex = counties
+  .filter((c) => NAME_TO_ABBR[c.stateName])
+  .map((c) => ({
+    qid: c.qid,
+    name: c.name,
+    state: NAME_TO_ABBR[c.stateName],
+    stateName: c.stateName,
+    label: `${c.name}, ${c.stateName}`,
+  }));
+writeFileSync("county-index.js", "window.COUNTY_INDEX = " + JSON.stringify(countyIndex) + ";\n");
+console.log(`Wrote county-index.js — ${countyIndex.length} counties.`);
 
 const count = (n) => 1 + (n.children ? n.children.reduce((a, c) => a + count(c), 0) : 0);
 const stateLegCount = Object.values(stateLegByAbbr).reduce((a, s) => a + s.upper.length + s.lower.length + s.unicameral.length, 0);
