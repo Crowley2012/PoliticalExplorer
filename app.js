@@ -48,11 +48,18 @@
     .on("click", () => zoom(focus.parent || root));
 
   // ---------- circles ----------
-  const node = svg
-    .append("g")
+  // nodeLayer gets one shared transform per zoom frame instead of rewriting
+  // transform/r on all 8,840+ circles every frame — cx/cy/r are static pack
+  // coordinates set once below.
+  const nodeLayer = svg.append("g");
+  const node = nodeLayer
     .selectAll("circle")
     .data(root.descendants())
     .join("circle")
+    .attr("cx", (d) => d.x)
+    .attr("cy", (d) => d.y)
+    .attr("r", (d) => Math.max(d.r, 0.1))
+    .attr("vector-effect", "non-scaling-stroke")
     .attr("class", (d) => "n-" + (d.data.kind || "group"))
     .attr("fill", (d) => {
       if (d.data.kind === "person") return PARTY_COLOR[d.data.party] || PARTY_COLOR.O;
@@ -159,10 +166,7 @@
   function zoomTo(v) {
     const k = S / v[2];
     view = v;
-    node
-      .attr("transform", (d) => `translate(${(d.x - v[0]) * k},${(d.y - v[1]) * k})`)
-      .attr("r", (d) => Math.max(d.r * k, 0.1));
-    label.attr("transform", (d) => `translate(${(d.x - v[0]) * k},${(d.y - v[1]) * k})`);
+    nodeLayer.attr("transform", `scale(${k}) translate(${-v[0]},${-v[1]})`);
   }
 
   function labelVisible(d, k) {
@@ -173,6 +177,7 @@
 
   function updateLabels(k) {
     label
+      .attr("transform", (d) => `translate(${(d.x - view[0]) * k},${(d.y - view[1]) * k})`)
       .style("display", (d) => (labelVisible(d, k) ? "inline" : "none"))
       .attr("font-size", (d) => {
         const pr = d.r * k;
